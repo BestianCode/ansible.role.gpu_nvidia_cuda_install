@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: Oleg Smirnov
+  description: Install NVidia drivers and CUDA
+  license: BSD-2-Clause
+  min_ansible_version: "2.9"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+  galaxy_tags:
+    - infiniband
+    - mlnx
+    - ofed
+    - cleanup
+    - networking
+
+dependencies: []

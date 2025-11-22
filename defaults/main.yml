@@ -1,0 +1,77 @@
+---
+# Defaults for nvidia role
+
+# Allow running on other distros (not recommended)
+nvidia_allow_other_distros: false
+
+# Driver series and branch from Ubuntu repos observed on the reference host
+nvidia_driver_series: "570-server"
+nvidia_driver_branch: "570-server-open"
+
+# Exact firmware package version suffix (from apt: nvidia-firmware-570-server-570.158.01)
+nvidia_driver_version: "570.195.03"
+
+# Whether to install the firmware package explicitly
+nvidia_install_firmware: true
+
+# Whether to add libnvidia-container repository and install container toolkit
+nvidia_add_container_repo: true
+
+# Whether to install Fabric Manager (needed for NVSwitch platforms)
+nvidia_install_fabric_manager: true
+nvidia_fabricmanager_version: "{{ nvidia_driver_version }}"
+# Ubuntu package suffix used by NVIDIA packages (adjust if archive changes)
+nvidia_ubuntu_pkg_suffix: "-0ubuntu0.24.04.2"
+
+
+# Driver packages to install
+nvidia_driver_packages:
+  - "nvidia-headless-{{ nvidia_driver_branch }}"
+  - "nvidia-headless-no-dkms-{{ nvidia_driver_branch }}"
+  - "nvidia-dkms-{{ nvidia_driver_branch }}"
+  - "nvidia-kernel-common-{{ nvidia_driver_series }}"
+  - "nvidia-kernel-source-{{ nvidia_driver_branch }}"
+  - "nvidia-utils-{{ nvidia_driver_series }}"
+  - "nvidia-compute-utils-{{ nvidia_driver_series }}"
+  # Explicitly include these libraries to mirror the reference host
+  - "libnvidia-compute-{{ nvidia_driver_series }}"
+  - "libnvidia-cfg1-{{ nvidia_driver_series }}"
+
+# CUDA packages (from Ubuntu 24.04 repos) roughly matching the reference host
+nvidia_cuda_packages:
+  - nvidia-cuda-toolkit
+  - nvidia-cuda-gdb
+  - nvidia-cuda-dev
+  - nvidia-opencl-dev
+  - nvidia-profiler
+  - nvidia-visual-profiler
+  - nvidia-cuda-toolkit-doc
+  - libnvidia-ml-dev
+  - libcudart12
+
+# RDMA / InfiniBand userspace packages (Ubuntu)
+rdma_userspace_packages:
+  - rdma-core
+  - infiniband-diags
+  - ibverbs-utils
+  - ibverbs-providers
+  - librdmacm1
+  - librdmacm-dev
+  - libibverbs1
+  - libibverbs-dev
+  - libibumad3
+  - libibumad-dev
+  - libibmad5
+  - libibmad-dev
+
+# MLNX OFED (optional advanced path)
+nvidia_install_mofed: false
+nvidia_mofed_installer_url: ""
+nvidia_mofed_dir_name: ""
+
+# Optionally reboot if driver was installed/updated and kernel modules are not yet active
+nvidia_reboot_if_driver_installed: false
+
+# Optionally run a quick docker GPU smoke test after configuring the runtime
+nvidia_test_gpu_in_container: true
+nvidia_test_gpu_image: "nvidia/cuda:12.6.0-base-ubuntu22.04"

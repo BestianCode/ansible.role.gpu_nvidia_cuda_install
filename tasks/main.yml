@@ -1,0 +1,307 @@
+---
+# Role: nvidia
+# Ensure NVIDIA drivers, CUDA toolkit, NVIDIA Container Toolkit, and RDMA/InfiniBand userspace tools on Ubuntu 24.04.
+
+- name: Assert supported distribution (Ubuntu 24.04)
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'Debian'
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] is version('24.04', '==')
+      - ansible_facts['architecture'] == 'x86_64'
+    fail_msg: This role targets Ubuntu 24.04 (x86_64) only. Set nvidia_allow_other_distros=true to override.
+    success_msg: Ubuntu 24.04 detected. Proceeding.
+  when: not (nvidia_allow_other_distros | default(false))
+
+- name: Ensure apt cache is up to date
+  become: true
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install prerequisite packages
+  become: true
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - dkms
+      - build-essential
+      - linux-headers-generic
+      - pciutils
+    state: present
+
+- name: Optionally add NVIDIA Container Toolkit APT repository
+  when: nvidia_add_container_repo | default(true)
+  block:
+    - name: Ensure apt keyrings directory exists
+      become: true
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download NVIDIA Container Toolkit repo key (ASCII)
+      become: true
+      ansible.builtin.get_url:
+        url: https://nvidia.github.io/libnvidia-container/gpgkey
+        dest: /etc/apt/keyrings/nvidia-container-toolkit.asc
+        mode: '0644'
+
+    - name: Dearmor NVIDIA key into keyring (idempotent)
+      become: true
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o /etc/apt/keyrings/nvidia-container-toolkit.gpg /etc/apt/keyrings/nvidia-container-toolkit.asc
+      args:
+        creates: /etc/apt/keyrings/nvidia-container-toolkit.gpg
+
+    - name: Ensure NVIDIA keyring permissions are readable by apt
+      become: true
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/nvidia-container-toolkit.gpg
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Remove incorrect libnvidia-container repo (if previously added)
+      become: true
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch=amd64 signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg]
+          https://nvidia.github.io/libnvidia-container/stable/ubuntu24.04/amd64 /
+        filename: libnvidia-container
+        state: absent
+
+    - name: Remove old libnvidia-container repo using /usr/share keyring (if present)
+      become: true
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg]
+          https://nvidia.github.io/libnvidia-container/stable/deb/amd64 /
+        filename: libnvidia-container
+        state: absent
+
+    - name: Add libnvidia-container APT repo (stable/deb/amd64)
+      become: true
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.gpg]
+          https://nvidia.github.io/libnvidia-container/stable/deb/amd64 /
+        filename: libnvidia-container
+        state: present
+        update_cache: true
+
+- name: Install NVIDIA driver (server open module)
+  become: true
+  ansible.builtin.apt:
+    name: "{{ nvidia_driver_packages }}"
+    state: present
+  register: nvidia_driver_install
+
+- name: Optionally install firmware meta (exact version pin)
+  when: nvidia_install_firmware | default(true)
+  become: true
+  ansible.builtin.apt:
+    name: "nvidia-firmware-{{ nvidia_driver_series }}-{{ nvidia_driver_version }}"
+    state: present
+  register: nvidia_firmware_install
+
+- name: Optionally install NVIDIA Fabric Manager (for NVSwitch systems)
+  when: nvidia_install_fabric_manager | default(false)
+  become: true
+  block:
+    - name: Install NVIDIA Fabric Manager pinned to driver version
+      ansible.builtin.apt:
+        name: "nvidia-fabricmanager-{{ nvidia_driver_series | regex_replace('-server', '') }}={{ nvidia_driver_version }}{{ nvidia_ubuntu_pkg_suffix }}"
+        state: present
+      register: fabricmgr_pin_result
+
+    - name: Mark Fabric Manager install success (pinned)
+      ansible.builtin.set_fact:
+        fabricmgr_install_ok: true
+      when: fabricmgr_pin_result is succeeded
+
+- name: Collect service facts (for Fabric Manager)
+  when:
+    - nvidia_install_fabric_manager | default(false)
+    - fabricmgr_install_ok | default(false)
+  ansible.builtin.service_facts:
+
+- name: Ensure NVIDIA Fabric Manager service is enabled and started
+  when:
+    - nvidia_install_fabric_manager | default(false)
+    - fabricmgr_install_ok | default(false)
+    - ansible_facts.services is defined
+    - "'nvidia-fabricmanager.service' in ansible_facts.services or 'nvidia-fabricmanager' in ansible_facts.services"
+  become: true
+  ansible.builtin.service:
+    name: nvidia-fabricmanager
+    enabled: true
+    state: started
+
+- name: Install CUDA toolkit (Ubuntu packaged 12.x)
+  become: true
+  ansible.builtin.apt:
+    name: "{{ nvidia_cuda_packages }}"
+    state: present
+
+- name: Install NVIDIA Container Toolkit (userspace)
+  become: true
+  ansible.builtin.apt:
+    name:
+      - libnvidia-container1
+      - libnvidia-container-tools
+      - nvidia-container-toolkit-base
+      - nvidia-container-toolkit
+    state: present
+  register: nvidia_toolkit_install
+
+- name: Configure NVIDIA runtime for Docker (if Docker present)
+  block:
+    - name: Check if Docker CLI exists
+      ansible.builtin.stat:
+        path: /usr/bin/docker
+      register: docker_cli
+
+    - name: Check if Docker daemon.json already references nvidia runtime
+      ansible.builtin.command: grep -q '"nvidia"' /etc/docker/daemon.json
+      register: docker_has_nvidia_runtime
+      changed_when: false
+      failed_when: false
+      when: docker_cli.stat.exists
+
+    - name: Configure NVIDIA Container Toolkit for Docker
+      ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
+      register: nvidia_ctk_configure
+      when:
+        - docker_cli.stat.exists
+        - docker_has_nvidia_runtime.rc is defined and docker_has_nvidia_runtime.rc != 0
+      changed_when: nvidia_ctk_configure.rc == 0
+
+    - name: Restart Docker after NVIDIA runtime configuration or install
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+      when: >-
+        docker_cli.stat.exists and (
+          (nvidia_ctk_configure is defined and (nvidia_ctk_configure.rc | default(1)) == 0) or
+          (nvidia_toolkit_install is defined and nvidia_toolkit_install.changed)
+        )
+
+    - name: Verify Docker sees nvidia runtime
+      ansible.builtin.command: docker info
+      register: docker_info
+      changed_when: false
+      failed_when: false
+      when: docker_cli.stat.exists
+
+    - name: Debug Docker runtimes
+      ansible.builtin.debug:
+        msg: "Docker runtimes line: {{ (docker_info.stdout_lines | select('search', 'Runtimes') | list) }}"
+      when: docker_cli.stat.exists
+
+    - name: Optional GPU test inside container (nvidia-smi)
+      when:
+        - docker_cli.stat.exists
+        - nvidia_test_gpu_in_container | default(true)
+      ansible.builtin.command: >-
+        docker run --rm --gpus all --pull=missing {{ nvidia_test_gpu_image | default('nvidia/cuda:12.6.0-base-ubuntu22.04') }}
+        nvidia-smi -L
+      register: docker_gpu_test
+      changed_when: false
+      failed_when: false
+
+- name: Install RDMA / InfiniBand userspace tools (Ubuntu packages)
+  become: true
+  ansible.builtin.apt:
+    name: "{{ rdma_userspace_packages }}"
+    state: present
+
+# Optional: Install MLNX OFED (advanced)
+- name: Optionally install NVIDIA MLNX OFED (advanced)
+  when: nvidia_install_mofed | default(false)
+  block:
+    - name: Create temp dir for MLNX OFED
+      become: true
+      ansible.builtin.file:
+        path: /tmp/mlnx_ofed
+        state: directory
+        mode: '0755'
+
+    - name: Download MLNX OFED installer
+      become: true
+      when: nvidia_mofed_installer_url | default('') | length > 0
+      ansible.builtin.get_url:
+        url: "{{ nvidia_mofed_installer_url }}"
+        dest: "/tmp/mlnx_ofed/{{ nvidia_mofed_installer_url | basename }}"
+        mode: '0644'
+
+    - name: Extract MLNX OFED installer
+      become: true
+      when: nvidia_mofed_installer_url | default('') | length > 0
+      ansible.builtin.unarchive:
+        src: "/tmp/mlnx_ofed/{{ nvidia_mofed_installer_url | basename }}"
+        dest: /tmp/mlnx_ofed
+        remote_src: true
+
+    - name: Run MLNX OFED installer
+      become: true
+      ansible.builtin.command:
+        cmd: ./mlnxofedinstall --force --without-fw-update --skip-distro-check
+        chdir: "/tmp/mlnx_ofed/{{ nvidia_mofed_dir_name }}"
+      register: mofed_install
+      changed_when: >-
+        (mofed_install.stdout is defined and 'installed successfully' in mofed_install.stdout)
+        or (mofed_install.rc is defined and mofed_install.rc == 0)
+  rescue:
+    - name: Warn MLNX OFED install failed
+      ansible.builtin.debug:
+        msg: MLNX OFED installation failed. Check kernel headers and supported distro.
+
+- name: Verify nvidia-smi runs
+  ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+  register: nvidia_smi_out
+  changed_when: false
+  failed_when: false
+
+- name: Reboot if driver was just installed and nvidia-smi still fails
+  when: >-
+    nvidia_reboot_if_driver_installed | default(true) and
+    (
+      (nvidia_driver_install is defined and nvidia_driver_install.changed) or
+      (nvidia_firmware_install is defined and nvidia_firmware_install.changed)
+    ) and
+    (nvidia_smi_out.rc is defined and nvidia_smi_out.rc != 0)
+  become: true
+  ansible.builtin.reboot:
+    msg: "Reboot triggered by NVIDIA driver installation to load kernel modules"
+    connect_timeout: 60
+    reboot_timeout: 900
+    pre_reboot_delay: 3
+    post_reboot_delay: 10
+
+- name: Verify nvidia-smi after reboot (if any)
+  ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+  register: nvidia_smi_out_post
+  changed_when: false
+  failed_when: false
+
+- name: Verify nvcc (CUDA) if installed
+  ansible.builtin.command: nvcc --version
+  register: nvcc_out
+  changed_when: false
+  failed_when: false
+
+- name: Verify RDMA device list
+  ansible.builtin.command: ibv_devinfo -l
+  register: ibv_out
+  changed_when: false
+  failed_when: false
+
+- name: Summary (debug)
+  ansible.builtin.debug:
+    msg:
+      - "nvidia-smi: {{ (nvidia_smi_out.stdout_lines | default([])) | join('; ') }}"
+      - "nvcc: {{ (nvcc_out.stdout_lines | default([])) | join(' ') }}"
+      - "RDMA devices: {{ (ibv_out.stdout_lines | default([])) | join(', ') }}"
